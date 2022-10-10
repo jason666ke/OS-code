@@ -6,6 +6,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sysinfo.h"
 
 uint64
 sys_exit(void)
@@ -94,4 +95,43 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64
+sys_trace(void)
+{
+  int n;
+
+  if (argint(0, &n) < 0) {
+    return -1;
+  }
+
+  myproc() -> tracemask = n;
+  return 0;
+}
+
+uint64
+sys_sysinfo(void)
+{
+  uint64 addr;
+  struct proc *p = myproc();
+
+  if (argaddr(0, &addr) < 0) {
+    return -1;
+  }
+
+  // 声明sysinfo
+  struct sysinfo info;
+  // 需要实现三个函数分别计算剩余内存空间、空闲进程、可用文件描述符
+  info.freemem  = get_free_mem();             // 内存空间
+  info.nproc    = get_unused_proc_num();      // 空闲进程
+  info.freefd   = get_free_fd();              // 可用文件描述符
+
+  // copyout 参数: 进程页表， 用户态目标地址， 数据源地址，数据大小
+  // 返回值： 数据大小
+  if (copyout(p->pagetable, addr, (char *)&info, sizeof(info)) < 0) {
+    return -1;
+  }
+
+  return 0;
 }

@@ -295,6 +295,8 @@ fork(void)
 
   np->state = RUNNABLE;
 
+  np -> tracemask = p -> tracemask;
+
   release(&np->lock);
 
   return pid;
@@ -692,4 +694,45 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+// 计算空闲进程数量
+int 
+get_unused_proc_num(void)
+{
+  struct proc *p;
+  int free_num = 0;
+
+  for (p = proc; p < &proc[NPROC]; p++) {
+    
+    // 加锁
+    acquire(&p->lock);
+
+    if (p->state == UNUSED) {
+      free_num += 1;
+    }
+
+    // 解锁
+    release(&p->lock);
+  }
+
+  return free_num;
+}
+
+// 计算可用文件描述符的数量
+uint64
+get_free_fd(void)
+{
+  uint64 num = 0;
+  int fd;
+  struct proc *p = myproc();
+
+  for (fd = 0; fd < NOFILE; fd++) {
+    // 文件描述符的值是PCB成员中ofile的下标
+    if (p->ofile[fd] == 0) {
+      num += 1;
+    }
+  }
+
+  return num;
 }
