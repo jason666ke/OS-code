@@ -2,6 +2,7 @@
     "files.associations": {
         "user.h": "c",
         "new": "c",
-        "stat.h": "c"
+        "stat.h": "c",
+        "limits": "cpp"
     }
 }
