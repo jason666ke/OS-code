@@ -18,7 +18,7 @@ struct spinlock pid_lock;
 extern void forkret(void);
 static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
-
+void proc_free_k_pagetable(pagetable_t k_pagetable);
 extern char trampoline[]; // trampoline.S
 
 // initialize the proc table at boot time.
@@ -37,9 +37,14 @@ procinit(void)
       char *pa = kalloc();
       if(pa == 0)
         panic("kalloc");
+      
+      // 将内核#kvm栈的物理地址pa拷贝到PCB新增的成员中
+      p->kstack_pa = (uint64) pa;
+
       uint64 va = KSTACK((int) (p - proc));
+      // 保留内核栈在全局页表kernel_pagetable的映射
       kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+      // p->kstack = va;
   }
   kvminithart();
 }
@@ -121,6 +126,20 @@ found:
     return 0;
   }
 
+  // 为进程分配内核页表
+  p->k_pagetable = proc_k_pagetable();
+  if (p->k_pagetable == 0) {
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // 完成内核栈的映射
+  char *pa = (char *)p->kstack_pa;
+  uint64 va = KSTACK((int) 0);
+  uvmmap(p->k_pagetable, va, (uint64) pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -142,6 +161,14 @@ freeproc(struct proc *p)
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+
+  // 释放内核页表
+  if (p->k_pagetable) {
+    proc_free_k_pagetable(p->k_pagetable);
+  }
+  p->k_pagetable = 0;
+  p->kstack = 0;
+
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -195,6 +222,15 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
   uvmfree(pagetable, sz);
 }
 
+/**
+ * 释放内核页表
+*/
+void
+proc_free_k_pagetable(pagetable_t k_pagetable) {
+  // 释放内核页表
+  uvmkpg_freewalk(k_pagetable);
+}
+
 // a user program that calls exec("/init")
 // od -t xC initcode
 uchar initcode[] = {
@@ -221,6 +257,11 @@ userinit(void)
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
+  // 将用户页表映射到内核页表中
+  if (uvmmap_copy(p->pagetable, p->k_pagetable, 0, PGSIZE) < 0) {
+    panic("userinit: uvmmap_copy");
+  }
+
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -242,12 +283,31 @@ growproc(int n)
   struct proc *p = myproc();
 
   sz = p->sz;
+
+  // 实现用户页表的映射地址不超过PLIC
+  uint begin;
+  uint end;
+  
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+    begin = sz;
+    // 当前用户进程超过PLIC
+    if((sz + n) > PLIC || (sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    end = sz;
+    // 实现映射过程
+    if (end >= begin) {
+      uvmmap_copy(p->pagetable, p->k_pagetable, PGROUNDUP(begin), end);
+    }
   } else if(n < 0){
+    begin = sz;
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+    end = sz;
+    // 内存不足则增长内存
+    if (end < begin && PGROUNDUP(end) < PGROUNDUP(begin)) {
+      int npages = (PGROUNDUP(begin) - PGROUNDUP(end)) / PGSIZE;
+      uvmunmap(p->k_pagetable, PGROUNDUP(end), npages, 0);
+    }
   }
   p->sz = sz;
   return 0;
@@ -275,6 +335,12 @@ fork(void)
   }
   np->sz = p->sz;
 
+  // 将用户页表复制到内核页表中
+  if (uvmmap_copy(np->pagetable, np->k_pagetable, 0, np->sz) < 0) {
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
   np->parent = p;
 
   // copy saved user registers.
@@ -473,7 +539,15 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        // 将进程对应页表放入satp中，并刷新TLB
+        w_satp(MAKE_SATP(p->k_pagetable));
+        sfence_vma();
+
         swtch(&c->context, &p->context);
+
+        // 进程运行完毕时，satp载入全局的内核页表
+        kvminithart();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
